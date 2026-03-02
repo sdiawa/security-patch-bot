@@ -1,0 +1,49 @@
+gitlab:
+  url: ""
+  group_id: 
+  default_branch: "main"
+  branch_prefix: "sec/patch"
+  labels: ["security", "auto"]
+
+discovery:
+  include_subgroups: true
+  exclude_projects:
+    - "dsk-lab/sandbox"
+    - "dsk-lab/archive-*"
+
+files:
+  chart_globs:
+    - "DSKBF/*/dev/Chart.y*ml"
+    - "DSKBF/*/qua/Chart.y*ml"
+    - "DSKBF/*/prod/Chart.y*ml"
+  values_globs:
+    - "DSKBF/*/dev/values/values.y*ml"
+    - "DSKBF/*/qua/values/values.y*ml"
+    - "DSKBF/*/prod/values/values.y*ml"
+
+policy:
+  helm_dependencies:
+    backend: "1.1.4"
+    batch: "1.1.15"
+    spark: "3.1.0"
+
+  images:
+    vault:
+      repositories: ["hashicorp/vault", "docker.io/hashicorp/vault"]
+      tag: "1.15.8"
+    httpd:
+      repositories: ["httpd", "docker.io/library/httpd"]
+      tag: "2.4.61"
+
+rules:
+  ignore_latest: true
+  patch_only: true
+  open_mr_only_if_changed: true
+  allowed_deps: ["backend", "batch", "spark"]
+
+execution:
+  dry_run: true
+  log_level: "INFO"
+  create_branch_if_missing: true
+  mr_title_prefix: "Security patches"
+  

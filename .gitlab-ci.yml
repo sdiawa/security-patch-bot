@@ -1,0 +1,139 @@
+spec:
+  inputs:
+    scope:
+      description: "Scope du patch: group ou project"
+      type: string
+      default: "group"
+      options: ["group", "project"]
+
+    envs:
+      description: "Environnements ciblés"
+      type: string
+      default: "all"
+      options: ["all", "dev", "qua", "prod", "dev,qua", "dev,prod", "qua,prod", "dev,qua,prod"]
+
+    group_id:
+      description: "Group ID si scope=group (vide = prend config.yaml)"
+      type: string
+      default: ""
+
+    project_path:
+      description: "Project path si scope=project (ex: dsk-lab/dm)"
+      type: string
+      default: ""
+
+    project_id:
+      description: "Project ID si scope=project (optionnel, remplace project_path)"
+      type: string
+      default: ""
+
+    branch_prefix:
+      description: "Préfixe de branche (ex: sec/patch)"
+      type: string
+      default: "sec/patch"
+---
+stages:
+  - validate
+  - report
+  - apply
+
+default:
+  tags: [k8s]
+
+workflow:
+  rules:
+    - when: always
+
+variables:
+  BOT_CONFIG: "config.yaml"
+
+  # Inputs -> variables d'environnement pour patch_bot.py
+  SCOPE: $[[ inputs.scope ]]
+  ENVS: $[[ inputs.envs ]]
+  GROUP_ID: $[[ inputs.group_id ]]
+  PROJECT_PATH: $[[ inputs.project_path ]]
+  PROJECT_ID: $[[ inputs.project_id ]]
+  BRANCH_PREFIX: $[[ inputs.branch_prefix ]]
+
+.before_script_ca: &before_script_ca
+  - set -euo pipefail
+  - echo "== Load CA (mkcert) =="
+  - |
+    if [ -n "${HARBOR_CA_CRT:-}" ] && [ -f "$HARBOR_CA_CRT" ]; then
+      cp "$HARBOR_CA_CRT" /usr/local/share/ca-certificates/dsk-rootca.crt
+      update-ca-certificates
+      export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+      echo "CA installed OK"
+    else
+      echo "HARBOR_CA_CRT not found (File variable) -> FAIL"
+      exit 1
+    fi
+  - echo "== Effective parameters (from pipeline inputs) =="
+  - echo "BOT_CONFIG=$BOT_CONFIG"
+  - echo "SCOPE=$SCOPE"
+  - echo "GROUP_ID=$GROUP_ID"
+  - echo "PROJECT_PATH=$PROJECT_PATH"
+  - echo "PROJECT_ID=$PROJECT_ID"
+  - echo "ENVS=$ENVS"
+  - echo "BRANCH_PREFIX=$BRANCH_PREFIX"
+
+validate-inputs:
+  stage: validate
+  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  when: manual
+  script:
+    - *before_script_ca
+    - echo "== Validate inputs =="
+    - |
+      case "$SCOPE" in
+        group|project) ;;
+        *) echo "ERROR: SCOPE must be group|project"; exit 2;;
+      esac
+
+      case "$ENVS" in
+        all|dev|qua|prod|dev,qua|dev,prod|qua,prod|dev,qua,prod) ;;
+        *) echo "ERROR: ENVS invalid. Use all/dev/qua/prod/dev,qua/..."; exit 2;;
+      esac
+
+      if [ "$SCOPE" = "project" ]; then
+        if [ -z "${PROJECT_ID:-}" ] && [ -z "${PROJECT_PATH:-}" ]; then
+          echo "ERROR: SCOPE=project requires PROJECT_ID or PROJECT_PATH"
+          exit 2
+        fi
+      fi
+
+      echo "OK: inputs valid"
+
+security-report:
+  stage: report
+  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  needs: ["validate-inputs"]
+  when: manual
+  script:
+    - *before_script_ca
+    - echo "== SECURITY REPORT MODE (dry-run) =="
+    - export DRY_RUN=true
+    - python patch_bot.py --config "$BOT_CONFIG"
+  artifacts:
+    when: always
+    paths:
+      - report.txt
+    expire_in: 30 days
+
+security-apply:
+  stage: apply
+  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  needs: ["validate-inputs"]
+  when: manual
+  script:
+    - *before_script_ca
+    - echo "== SECURITY APPLY MODE (create MR) =="
+    - export DRY_RUN=false
+    - python patch_bot.py --config "$BOT_CONFIG"
+  artifacts:
+    when: always
+    paths:
+      - report.txt
+    expire_in: 30 days

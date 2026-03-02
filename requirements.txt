@@ -1,0 +1,4 @@
+python-gitlab
+ruamel.yaml
+packaging
+fnmatch2
