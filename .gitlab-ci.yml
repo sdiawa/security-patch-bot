@@ -10,7 +10,25 @@ spec:
       description: "Environnements ciblés"
       type: string
       default: "all"
-      options: ["all", "dev", "qua", "prod", "dev,qua", "dev,prod", "qua,prod", "dev,qua,prod"]
+      options:
+        - "all"
+        - "dev"
+        - "int"
+        - "qua"
+        - "prod"
+        - "prd"
+        - "qualiso"
+        - "dev,int"
+        - "dev,qua"
+        - "dev,prod"
+        - "dev,prd"
+        - "int,qua"
+        - "qua,prod"
+        - "qua,prd"
+        - "dev,int,qua"
+        - "dev,int,qua,prod"
+        - "dev,int,qua,prd"
+        - "dev,int,qua,prod,qualiso"
 
     group_id:
       description: "Group ID si scope=group (vide = prend config.yaml)"
@@ -31,14 +49,12 @@ spec:
       description: "Préfixe de branche (ex: sec/patch)"
       type: string
       default: "sec/patch"
+
 ---
 stages:
   - validate
   - report
   - apply
-
-default:
-  tags: [k8s]
 
 workflow:
   rules:
@@ -56,45 +72,62 @@ variables:
   BRANCH_PREFIX: $[[ inputs.branch_prefix ]]
 
 .before_script_ca: &before_script_ca
-  - set -euo pipefail
-  - echo "== Load CA (mkcert) =="
   - |
-    if [ -n "${HARBOR_CA_CRT:-}" ] && [ -f "$HARBOR_CA_CRT" ]; then
-      cp "$HARBOR_CA_CRT" /usr/local/share/ca-certificates/dsk-rootca.crt
-      update-ca-certificates
-      export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-      export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-      export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
-      echo "CA installed OK"
-    else
-      echo "HARBOR_CA_CRT not found (File variable) -> FAIL"
-      exit 1
-    fi
-  - echo "== Effective parameters (from pipeline inputs) =="
-  - echo "BOT_CONFIG=$BOT_CONFIG"
-  - echo "SCOPE=$SCOPE"
-  - echo "GROUP_ID=$GROUP_ID"
-  - echo "PROJECT_PATH=$PROJECT_PATH"
-  - echo "PROJECT_ID=$PROJECT_ID"
-  - echo "ENVS=$ENVS"
-  - echo "BRANCH_PREFIX=$BRANCH_PREFIX"
+    echo "== Effective parameters (from pipeline inputs) =="
+    echo "BOT_CONFIG=$BOT_CONFIG"
+    echo "SCOPE=$SCOPE"
+    echo "GROUP_ID=$GROUP_ID"
+    echo "PROJECT_PATH=$PROJECT_PATH"
+    echo "PROJECT_ID=$PROJECT_ID"
+    echo "ENVS=$ENVS"
+    echo "BRANCH_PREFIX=$BRANCH_PREFIX"
+
+.setup_python: &setup_python
+  - |
+    mkdir -p pip
+    cat > pip/pip.conf <<EOF
+    [global]
+    index-url = 
+    cert =
+    timeout = 600
+    retries = 2
+    EOF
+  - export PIP_CONFIG_FILE=pip/pip.conf
+  - python3 --version
+  - python3 -m pip config list
+  - python3 -m pip install --upgrade pip
+  - python3 -m pip install -r requirements.txt
 
 validate-inputs:
   stage: validate
-  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  image: image-registry:1.4.0
   when: manual
+  before_script:
+    - *setup_python
   script:
     - *before_script_ca
-    - echo "== Validate inputs =="
     - |
+      echo "== Validate inputs =="
+
       case "$SCOPE" in
         group|project) ;;
-        *) echo "ERROR: SCOPE must be group|project"; exit 2;;
+        *)
+          echo "ERROR: SCOPE must be group|project"
+          exit 2
+          ;;
       esac
 
       case "$ENVS" in
-        all|dev|qua|prod|dev,qua|dev,prod|qua,prod|dev,qua,prod) ;;
-        *) echo "ERROR: ENVS invalid. Use all/dev/qua/prod/dev,qua/..."; exit 2;;
+        all|dev|int|qua|prod|prd|qualiso|\
+        dev,int|dev,qua|dev,prod|dev,prd|\
+        int,qua|qua,prod|qua,prd|\
+        dev,int,qua|dev,int,qua,prod|dev,int,qua,prd|dev,int,qua,prod,qualiso)
+          ;;
+        *)
+          echo "ERROR: ENVS invalid."
+          echo "Allowed examples: all / dev / int / qua / prod / prd / qualiso / dev,int / dev,int,qua ..."
+          exit 2
+          ;;
       esac
 
       if [ "$SCOPE" = "project" ]; then
@@ -108,9 +141,11 @@ validate-inputs:
 
 security-report:
   stage: report
-  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  image: image-registry:1.4.0
   needs: ["validate-inputs"]
   when: manual
+  before_script:
+    - *setup_python
   script:
     - *before_script_ca
     - echo "== SECURITY REPORT MODE (dry-run) =="
@@ -124,9 +159,11 @@ security-report:
 
 security-apply:
   stage: apply
-  image: harbor-01.dsk.lab/devops2/security-patch-bot:1.0
+  image: image-registry:1.4.0
   needs: ["validate-inputs"]
   when: manual
+  before_script:
+    - *setup_python
   script:
     - *before_script_ca
     - echo "== SECURITY APPLY MODE (create MR) =="
