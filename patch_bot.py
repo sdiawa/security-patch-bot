@@ -157,18 +157,33 @@ def patch_chart_yaml(
     allowed_deps: Optional[List[str]] = None,
 ) -> Tuple[str, bool, List[str]]:
     """
-    Patch only dependencies[].version when dependencies[].name is in policy_deps
-    AND optionally in allowed_deps (allowlist).
+    Patch:
+      - dependencies[].version
+      - chart root version
+    using the SAME target version.
+
+    If one or more allowed dependencies are updated, chart root `version`
+    is synchronized to the target version of the patched dependency.
+
+    Notes:
+      - if several dependencies are patched in the same chart and their
+        target versions differ, the chart root version will follow the
+        LAST patched dependency encountered in the file.
+      - in most enterprise cases, one chart usually has one main dependency
+        (backend/frontend/batch/spark), so this is acceptable.
     """
     data = yaml.load(chart_text) or {}
     changed = False
     notes: List[str] = []
 
     deps = data.get("dependencies", [])
+    chart_target_version: Optional[str] = None
+
     if isinstance(deps, list):
         for dep in deps:
             if not isinstance(dep, dict):
                 continue
+
             name = str(dep.get("name", "")).strip()
             if not name:
                 continue
@@ -181,10 +196,19 @@ def patch_chart_yaml(
 
             cur = str(dep.get("version", "")).strip()
             tgt = str(policy_deps[name]).strip()
+
             if cur and cur != tgt:
                 dep["version"] = tgt
                 changed = True
+                chart_target_version = tgt
                 notes.append(f"dep {name}: {cur} -> {tgt}")
+
+    # Sync chart root version with dependency target version
+    if changed and chart_target_version:
+        cur_chart_version = str(data.get("version", "")).strip()
+        if cur_chart_version != chart_target_version:
+            data["version"] = chart_target_version
+            notes.append(f"chart version: {cur_chart_version} -> {chart_target_version}")
 
     if not changed:
         return chart_text, False, notes
@@ -199,58 +223,131 @@ def patch_values_yaml(
     ignore_latest: bool,
 ) -> Tuple[str, bool, List[str]]:
     """
-    Patch image tags in values.yaml if repository matches policy repositories.
-    Supports:
-      - obj.image.repository / obj.image.tag
-      - obj.repository / obj.tag
+    Patch image tags in values.yaml.
+
+    Supported patterns:
+      1) image:
+           repository: xxx
+           tag: yyy
+
+      2) image:
+           name: xxx
+           tag: yyy
+
+      3) repository: xxx
+         tag: yyy
+
+      4) name: xxx
+         tag: yyy
+
+    Matching policy can use:
+      - repositories: [...]
+      - names: [...]
     """
     data = yaml.load(values_text) or {}
     changed = False
     notes: List[str] = []
 
-    def apply_repo_tag(repo: str, cur_tag: Any, set_tag_fn, path_prefix: str):
-        nonlocal changed
+    def normalize_str(v: Any) -> str:
+        return str(v).strip() if v is not None else ""
+
+    def is_latest_tag(tag_val: Any) -> bool:
+        return isinstance(tag_val, str) and tag_val.strip().lower() == "latest"
+
+    def find_image_policy(repo: Optional[str], name: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
+        repo_norm = normalize_str(repo)
+        name_norm = normalize_str(name)
+
         for img_name, spec in images_policy.items():
-            repos = spec.get("repositories", []) or []
-            tgt = str(spec.get("tag", "")).strip()
-            if not tgt:
-                continue
-            if repo in repos:
-                if isinstance(cur_tag, str) and cur_tag.strip().lower() == "latest" and ignore_latest:
-                    notes.append(f"{path_prefix}tag latest ignored ({img_name})")
-                    return
-                if str(cur_tag).strip() != tgt:
-                    set_tag_fn(tgt)
-                    changed = True
-                    notes.append(f"{path_prefix}tag ({img_name}): {cur_tag} -> {tgt}")
-                return
+            spec_repos = [normalize_str(x) for x in (spec.get("repositories", []) or [])]
+            spec_names = [normalize_str(x) for x in (spec.get("names", []) or [])]
+
+            repo_match = repo_norm != "" and repo_norm in spec_repos
+            name_match = name_norm != "" and name_norm in spec_names
+
+            if repo_match or name_match:
+                return img_name, spec
+
+        return None
+
+    def apply_tag_patch(
+        repo: Optional[str],
+        name: Optional[str],
+        cur_tag: Any,
+        set_tag_fn,
+        path_prefix: str,
+    ):
+        nonlocal changed
+
+        match = find_image_policy(repo=repo, name=name)
+        if not match:
+            return
+
+        img_name, spec = match
+        tgt = normalize_str(spec.get("tag", ""))
+
+        if not tgt:
+            return
+
+        if is_latest_tag(cur_tag) and ignore_latest:
+            notes.append(f"{path_prefix}tag latest ignored ({img_name})")
+            return
+
+        cur_norm = normalize_str(cur_tag)
+        if cur_norm != tgt:
+            set_tag_fn(tgt)
+            changed = True
+
+            identity_parts = []
+            if repo:
+                identity_parts.append(f"repository={repo}")
+            if name:
+                identity_parts.append(f"name={name}")
+
+            identity = ", ".join(identity_parts) if identity_parts else img_name
+
+            notes.append(
+                f"{path_prefix}tag ({img_name}; {identity}): {cur_tag} -> {tgt}"
+            )
 
     def walk(obj: Any, path: str = ""):
         if isinstance(obj, dict):
-            # pattern: image: {repository, tag}
+            # Pattern 1 / 2:
+            # image:
+            #   repository: ...
+            #   name: ...
+            #   tag: ...
             if "image" in obj and isinstance(obj["image"], dict):
                 img = obj["image"]
                 repo = img.get("repository")
+                name = img.get("name")
                 tag = img.get("tag")
-                if isinstance(repo, str):
-                    apply_repo_tag(
-                        repo=repo,
+
+                if "tag" in img and ("repository" in img or "name" in img):
+                    apply_tag_patch(
+                        repo=repo if isinstance(repo, str) else None,
+                        name=name if isinstance(name, str) else None,
                         cur_tag=tag,
                         set_tag_fn=lambda v: img.__setitem__("tag", v),
                         path_prefix=f"{path}image.",
                     )
 
-            # pattern: {repository, tag} at same level
-            if "repository" in obj and "tag" in obj:
-                repo = obj.get("repository")
-                tag = obj.get("tag")
-                if isinstance(repo, str):
-                    apply_repo_tag(
-                        repo=repo,
-                        cur_tag=tag,
-                        set_tag_fn=lambda v: obj.__setitem__("tag", v),
-                        path_prefix=f"{path}",
-                    )
+            # Pattern 3 / 4:
+            # repository: ...
+            # name: ...
+            # tag: ...
+            repo = obj.get("repository")
+            name = obj.get("name")
+            tag = obj.get("tag")
+
+            if "tag" in obj and ("repository" in obj or "name" in obj):
+                apply_tag_patch(
+                    repo=repo if isinstance(repo, str) else None,
+                    name=name if isinstance(name, str) else None,
+                    cur_tag=tag,
+                    set_tag_fn=lambda v: obj.__setitem__("tag", v),
+                    path_prefix=f"{path}",
+                )
 
             for k, v in obj.items():
                 walk(v, f"{path}{k}.")
@@ -409,6 +506,7 @@ def format_notes_grouped(notes: List[str]) -> str:
     """
     notes entries look like:
       "path/to/file.yml: dep backend: 1.0.1 -> 1.1.2"
+      "path/to/file.yml: chart version: 1.0.1 -> 1.1.2"
       "path/to/values.yml: vault.image.tag (vault): 1.1.1 -> 1.15.8"
     We group by file path.
     """
@@ -426,7 +524,7 @@ def format_notes_grouped(notes: List[str]) -> str:
         out_lines.append(f"File: {fp}")
         for c in by_file[fp]:
             out_lines.append(f"  - {c}")
-        out_lines.append("")  # blank line
+        out_lines.append("")
     return "\n".join(out_lines).rstrip() + "\n"
 
 
@@ -613,7 +711,7 @@ def main():
         # changes exist
         total_projects_changed += 1
         unique_files = sorted(set(changed_files))
-        report_lines.append(f"Result: changes detected")
+        report_lines.append("Result: changes detected")
         report_lines.append(f"Files to patch: {len(unique_files)}")
         report_lines.append(f"Changes: {len(notes)}")
         report_lines.append("")
@@ -688,7 +786,11 @@ def main():
     write_report(report_path, report_content, log)
 
     # Also show summary in job log
-    log.info(f"[SUMMARY] projects_scanned={total_projects_scanned} projects_changed={total_projects_changed} files={total_files_changed} changes={total_changes}")
+    log.info(
+        f"[SUMMARY] projects_scanned={total_projects_scanned} "
+        f"projects_changed={total_projects_changed} "
+        f"files={total_files_changed} changes={total_changes}"
+    )
     log.info(f"Done. dry_run={dry_run}")
 
 
