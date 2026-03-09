@@ -72,46 +72,62 @@ def env_list_csv(v: Optional[str]) -> List[str]:
 
 def normalize_envs(envs: str) -> List[str]:
     """
-    ENVS:
+    ENVS examples:
       - all
       - dev
+      - int
       - qua
       - prod
+      - prd
+      - qualiso
       - dev,qua
+      - dev,int,qualiso
     """
+    allowed = {"dev", "int", "qua", "prod", "prd", "qualiso"}
+
     if not envs:
-        return ["dev", "qua", "prod"]
+        return sorted(list(allowed))
+
     s = envs.strip().lower()
     if s == "all":
-        return ["dev", "qua", "prod"]
+        return sorted(list(allowed))
+
     parts = [p.strip() for p in s.split(",") if p.strip()]
-    allowed = {"dev", "qua", "prod"}
     out = [p for p in parts if p in allowed]
-    return out if out else ["dev", "qua", "prod"]
+
+    return out if out else sorted(list(allowed))
 
 
 def filter_globs_by_env(globs: List[str], envs: List[str]) -> List[str]:
     """
-    Keep only globs that contain '/dev/' etc. If glob doesn't mention env,
-    keep it (backward compatible).
+    Strict env filtering:
+    - keep only globs matching selected envs
+    - if a glob contains an env segment not selected, drop it
+    - if a glob does not contain any known env segment, keep it
     """
     out: List[str] = []
+
+    known_envs = ["dev", "int", "qua", "prod", "prd", "qualiso"]
+
+    def has_env_segment(glob_lower: str, env_name: str) -> bool:
+        return f"/{env_name}/" in glob_lower or f"\\{env_name}\\" in glob_lower
+
+    selected = set([e.strip().lower() for e in envs if e.strip()])
+
     for g in globs:
         gl = g.lower()
-        if "/dev/" in gl or "\\dev\\" in gl:
-            if "dev" in envs:
-                out.append(g)
+
+        matched_envs = [env for env in known_envs if has_env_segment(gl, env)]
+
+        # glob générique sans env explicite => on garde
+        if not matched_envs:
+            out.append(g)
             continue
-        if "/qua/" in gl or "\\qua\\" in gl:
-            if "qua" in envs:
-                out.append(g)
-            continue
-        if "/prod/" in gl or "\\prod\\" in gl:
-            if "prod" in envs:
-                out.append(g)
-            continue
-        # glob not env-specific => keep
-        out.append(g)
+
+        # on garde uniquement si l'env du glob est explicitement sélectionné
+        if any(env in selected for env in matched_envs):
+            out.append(g)
+
     return out
 
 
