@@ -3,47 +3,168 @@ gitlab:
   group_id: 
   default_branch: "main"
   branch_prefix: "sec/patch"
-  labels: ["security", "auto"]
+  labels:
+    - security
+    - auto
+    - dependency-update
 
 discovery:
   include_subgroups: true
   exclude_projects:
-    - "dsk-lab/sandbox"
-    - "dsk-lab/archive-*"
+    - "*/sandbox"
+    - "*/archive-*"
+    - "*/poc-*"
+    - "*/demo-*"
 
 files:
   chart_globs:
-    - "DSKBF/*/dev/Chart.y*ml"
-    - "DSKBF/*/qua/Chart.y*ml"
-    - "DSKBF/*/prod/Chart.y*ml"
+    - "**/dev/Chart.y*ml"
+    - "**/int/Chart.y*ml"
+    - "**/qua/Chart.y*ml"
+    - "**/prod/Chart.y*ml"
+    - "**/prd/Chart.y*ml"
+    - "**/qualiso/Chart.y*ml"
+
   values_globs:
-    - "DSKBF/*/dev/values/values.y*ml"
-    - "DSKBF/*/qua/values/values.y*ml"
-    - "DSKBF/*/prod/values/values.y*ml"
+    - "**/dev/values/values.y*ml"
+    - "**/int/values/values.y*ml"
+    - "**/qua/values/values.y*ml"
+    - "**/prod/values/values.y*ml"
+    - "**/prd/values/values.y*ml"
+    - "**/qualiso/values/values.y*ml"
 
 policy:
   helm_dependencies:
-    backend: "1.1.4"
-    batch: "1.1.15"
+    frontend: "1.0.7"
+    backend: "1.0.11"
+    batch: "1.1.14"
     spark: "3.1.0"
 
   images:
-    vault:
-      repositories: ["hashicorp/vault", "docker.io/hashicorp/vault"]
-      tag: "1.15.8"
     httpd:
-      repositories: ["httpd", "docker.io/library/httpd"]
-      tag: "2.4.61"
+      names:
+        - "httpd"
+      repositories:
+        - "httpd"
+        - "docker.io/library/httpd"
+      tag: "2.4.70"
+
+    vault:
+      names:
+        - "vault"
+      repositories:
+        - "hashicorp/vault"
+        - "docker.io/hashicorp/vault"
+      tag: "1.21.2"
+
+    python:
+      names:
+        - "python"
+      repositories:
+        - "python"
+        - "docker.io/library/python"
+      tag: "3.12.57"
+
+    php:
+      names:
+        - "php"
+      repositories:
+        - "php"
+        - "docker.io/library/php"
+      tag: "8.2.33"
+
+    php83:
+      names:
+        - "php83"
+      tag: "8.3.3"
+
+    nodejs20:
+      names:
+        - "nodejs20"
+      tag: "20.0.13"
+
+    nodejs22:
+      names:
+        - "nodejs22"
+      tag: "22.0.7"
+
+    nodejs24:
+      names:
+        - "nodejs24"
+      tag: "24.0.1"
+
+    openjdk11:
+      names:
+        - "openjdk11"
+      tag: "11.1.24"
+
+    openjdk17:
+      names:
+        - "openjdk17"
+      tag: "17.1.26"
+
+    jdksemeru11:
+      names:
+        - "jdksemeru11"
+      tag: "8.1.23"
+
+    jdksemeru17:
+      names:
+        - "jdksemeru17"
+      tag: "17.1.33"
+
+    jdksemeru21:
+      names:
+        - "jdksemeru21"
+      tag: "21.0.29"
+
+    jdksemeru25:
+      names:
+        - "jdksemeru25"
+      tag: "25.0.5"
+
+    dotnet-aspnet-runtime8:
+      names:
+        - "dotnet-aspnet-runtime8"
+      tag: "8.0.20"
+
+    dotnet-aspnet-runtime10:
+      names:
+        - "dotnet-aspnet-runtime10"
+      tag: "10.0.3"
+
+    frb-rollout:
+      names:
+        - "frb-rollout"
+      tag: "1.0.23"
+
+    ttu8:
+      names:
+        - "ttu8"
+      tag: "17.20.23"
+
+    ttu17:
+      names:
+        - "ttu17"
+      tag: "20.0.40"
+
+    ttu21:
+      names:
+        - "ttu21"
+      tag: "20.0.7"
 
 rules:
   ignore_latest: true
   patch_only: true
   open_mr_only_if_changed: true
-  allowed_deps: ["backend", "batch", "spark"]
+  allowed_deps:
+    - "frontend"
+    - "backend"
+    - "batch"
+    - "spark"
 
 execution:
   dry_run: true
   log_level: "INFO"
   create_branch_if_missing: true
   mr_title_prefix: "Security patches"
-  
