@@ -36,9 +36,11 @@ files:
 policy:
   helm_dependencies:
     frontend: "1.0.7"
-    backend: "1.0.11"
+    backend: "1.0.10"
     batch: "1.1.14"
     spark: "3.1.0"
+    rollout: "1.0.9"
+    autosys: "1.0.5"
 
   images:
     httpd:
@@ -162,6 +164,8 @@ rules:
     - "backend"
     - "batch"
     - "spark"
+    - "rollout"
+    - "autosys"
 
 execution:
   dry_run: true
