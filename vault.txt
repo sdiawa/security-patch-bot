@@ -1,0 +1,77 @@
+Résolution d’incident
+
+Incident
+Titre : Vault authentication failure – Entity quota reached
+
+Date : 11/03/2026
+Service impacté : GitLab CI / Promote Docker Image
+Environnement : Production / Staging
+Pipeline : Promote Multiple Images
+
+
+Symptômes observés
+
+Le pipeline GitLab échoue lors de l’authentification à Vault.
+
+Message d’erreur observé dans le job :
+
+Unable to retrieve Vault token for API key
+
+egp standard policy
+block_new_entity_creation_after_entities_threshold_reached
+
+evaluation resulted in denial
+permission denied
+
+  Analyse
+
+Le pipeline utilise l’authentification JWT GitLab → Vault pour récupérer des secrets.
+
+Lors de la tentative d’authentification :
+
+1 Vault tente de créer une identity entity.
+
+2 Une EGP policy (Enterprise Guard Policy) bloque la création.
+
+3 La limite maximale d’entities Vault est atteinte.
+
+Policy impliquée :
+
+VCZMB/block_new_entity_creation_after_entities_threshold_reached
+
+Cette policy empêche la création de nouvelles entities lorsque le quota défini par la licence Vault est dépassé.
+
+
+Résolution
+
+L’équipe plateforme Vault a augmenté le quota d’entities Vault.
+
+Après augmentation du quota :
+
+Vault a pu créer la nouvelle identity entity
+
+l’authentification JWT a fonctionné
+
+les pipelines GitLab ont repris normalement
+
+
+  Cause racine
+
+Quota maximum d’entities Vault atteint.
+
+Chaque authentification GitLab peut créer une identity entity, et la limite configurée dans Vault avait été atteinte.
+
+
+  Commandes utiles pour investigation
+
+Lister les entities Vault :
+
+vault list identity/entity/name
+
+Lister les rôles Vault utilisés par le pipeline :
+
+vault list auth/promote-docker-image-XXXX/role
+
+Lire la configuration d’un rôle :
+
+vault read auth/promote-docker-image-XXXX/role/promote-docker-imag
