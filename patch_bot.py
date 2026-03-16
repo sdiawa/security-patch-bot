@@ -4,6 +4,7 @@ import time
 import base64
 import argparse
 import logging
+import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 import gitlab
@@ -39,7 +40,6 @@ def dump_yaml_to_str(data: Any) -> str:
 
 
 def validate_yaml(text: str) -> bool:
-    """Validate YAML after rewrite to avoid committing broken files."""
     try:
         _ = yaml.load(text)
         return True
@@ -47,11 +47,17 @@ def validate_yaml(text: str) -> bool:
         return False
 
 
+def safe_load_yaml(text: str) -> Any:
+    try:
+        return yaml.load(text) or {}
+    except Exception as e:
+        raise ValueError(f"invalid YAML: {e}")
+
+
 # -----------------------------
 # Env/CI helpers
 # -----------------------------
 def env_truthy(v: Optional[str]) -> Optional[bool]:
-    """Parse boolean from env var. Returns None if unset/empty."""
     if v is None:
         return None
     s = str(v).strip().lower()
@@ -71,18 +77,6 @@ def env_list_csv(v: Optional[str]) -> List[str]:
 
 
 def normalize_envs(envs: str) -> List[str]:
-    """
-    ENVS examples:
-      - all
-      - dev
-      - int
-      - qua
-      - prod
-      - prd
-      - qualiso
-      - dev,qua
-      - dev,int,qualiso
-    """
     allowed = {"dev", "int", "qua", "prod", "prd", "qualiso"}
 
     if not envs:
@@ -94,19 +88,11 @@ def normalize_envs(envs: str) -> List[str]:
 
     parts = [p.strip() for p in s.split(",") if p.strip()]
     out = [p for p in parts if p in allowed]
-
     return out if out else sorted(list(allowed))
 
 
 def filter_globs_by_env(globs: List[str], envs: List[str]) -> List[str]:
-    """
-    Strict env filtering:
-    - keep only globs matching selected envs
-    - if a glob contains an env segment not selected, drop it
-    - if a glob does not contain any known env segment, keep it
-    """
     out: List[str] = []
-
     known_envs = ["dev", "int", "qua", "prod", "prd", "qualiso"]
 
     def has_env_segment(glob_lower: str, env_name: str) -> bool:
@@ -116,19 +102,36 @@ def filter_globs_by_env(globs: List[str], envs: List[str]) -> List[str]:
 
     for g in globs:
         gl = g.lower()
-
         matched_envs = [env for env in known_envs if has_env_segment(gl, env)]
 
-        # glob générique sans env explicite => on garde
         if not matched_envs:
             out.append(g)
             continue
 
-        # on garde uniquement si l'env du glob est explicitement sélectionné
         if any(env in selected for env in matched_envs):
             out.append(g)
 
     return out
+
+
+# -----------------------------
+# Diff helpers
+# -----------------------------
+def build_diff(old_text: str, new_text: str, file_path: str) -> str:
+    diff = difflib.unified_diff(
+        old_text.splitlines(),
+        new_text.splitlines(),
+        fromfile=f"{file_path} (before)",
+        tofile=f"{file_path} (after)",
+        lineterm="",
+    )
+    return "\n".join(diff)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... [truncated] ..."
 
 
 # -----------------------------
@@ -160,8 +163,19 @@ def ensure_branch(project, branch: str, ref: str, dry_run: bool, log: logging.Lo
 
 
 def project_matches_any(patterns: List[str], path_with_namespace: str) -> bool:
-    """Patterns may include wildcards like dsk-lab/archive-*"""
     return any(fnmatch2(path_with_namespace, p) for p in patterns)
+
+
+def resolve_target_branch(project, cfg_default_branch: str) -> str:
+    forced = (os.getenv("TARGET_BRANCH") or "").strip()
+    if forced:
+        return forced
+
+    project_default = getattr(project, "default_branch", None)
+    if project_default:
+        return project_default
+
+    return cfg_default_branch or "main"
 
 
 # -----------------------------
@@ -172,23 +186,7 @@ def patch_chart_yaml(
     policy_deps: Dict[str, str],
     allowed_deps: Optional[List[str]] = None,
 ) -> Tuple[str, bool, List[str]]:
-    """
-    Patch:
-      - dependencies[].version
-      - chart root version
-    using the SAME target version.
-
-    If one or more allowed dependencies are updated, chart root `version`
-    is synchronized to the target version of the patched dependency.
-
-    Notes:
-      - if several dependencies are patched in the same chart and their
-        target versions differ, the chart root version will follow the
-        LAST patched dependency encountered in the file.
-      - in most enterprise cases, one chart usually has one main dependency
-        (backend/frontend/batch/spark), so this is acceptable.
-    """
-    data = yaml.load(chart_text) or {}
+    data = safe_load_yaml(chart_text)
     changed = False
     notes: List[str] = []
 
@@ -219,7 +217,6 @@ def patch_chart_yaml(
                 chart_target_version = tgt
                 notes.append(f"dep {name}: {cur} -> {tgt}")
 
-    # Sync chart root version with dependency target version
     if changed and chart_target_version:
         cur_chart_version = str(data.get("version", "")).strip()
         if cur_chart_version != chart_target_version:
@@ -238,29 +235,7 @@ def patch_values_yaml(
     images_policy: Dict[str, Any],
     ignore_latest: bool,
 ) -> Tuple[str, bool, List[str]]:
-    """
-    Patch image tags in values.yaml.
-
-    Supported patterns:
-      1) image:
-           repository: xxx
-           tag: yyy
-
-      2) image:
-           name: xxx
-           tag: yyy
-
-      3) repository: xxx
-         tag: yyy
-
-      4) name: xxx
-         tag: yyy
-
-    Matching policy can use:
-      - repositories: [...]
-      - names: [...]
-    """
-    data = yaml.load(values_text) or {}
+    data = safe_load_yaml(values_text)
     changed = False
     notes: List[str] = []
 
@@ -321,18 +296,10 @@ def patch_values_yaml(
                 identity_parts.append(f"name={name}")
 
             identity = ", ".join(identity_parts) if identity_parts else img_name
-
-            notes.append(
-                f"{path_prefix}tag ({img_name}; {identity}): {cur_tag} -> {tgt}"
-            )
+            notes.append(f"{path_prefix}tag ({img_name}; {identity}): {cur_tag} -> {tgt}")
 
     def walk(obj: Any, path: str = ""):
         if isinstance(obj, dict):
-            # Pattern 1 / 2:
-            # image:
-            #   repository: ...
-            #   name: ...
-            #   tag: ...
             if "image" in obj and isinstance(obj["image"], dict):
                 img = obj["image"]
                 repo = img.get("repository")
@@ -348,10 +315,6 @@ def patch_values_yaml(
                         path_prefix=f"{path}image.",
                     )
 
-            # Pattern 3 / 4:
-            # repository: ...
-            # name: ...
-            # tag: ...
             repo = obj.get("repository")
             name = obj.get("name")
             tag = obj.get("tag")
@@ -381,7 +344,7 @@ def patch_values_yaml(
 
 
 # -----------------------------
-# Commit via GitLab API (multi-actions)
+# Commit via GitLab API
 # -----------------------------
 def commit_actions(
     project,
@@ -427,7 +390,12 @@ def upsert_mr(
         return None
 
     try:
-        mrs = project.mergerequests.list(source_branch=source_branch, state="opened", all=True)
+        mrs = project.mergerequests.list(
+            source_branch=source_branch,
+            target_branch=target_branch,
+            state="opened",
+            all=True,
+        )
         if mrs:
             mr = project.mergerequests.get(mrs[0].iid)
             mr.title = title
@@ -455,27 +423,19 @@ def upsert_mr(
 
 
 # -----------------------------
-# Scope discovery (group vs project)
+# Scope discovery
 # -----------------------------
 def discover_projects(
     gl: gitlab.Gitlab,
     cfg: Dict[str, Any],
     log: logging.Logger,
 ) -> List[Any]:
-    """
-    Returns a list of project objects (as returned by python-gitlab).
-    Controlled by env vars:
-      - SCOPE=group|project
-      - GROUP_ID
-      - PROJECT_PATH or PROJECT_ID
-    """
     git_cfg = cfg["gitlab"]
     disc_cfg = cfg.get("discovery", {}) or {}
 
     scope = (os.getenv("SCOPE") or "group").strip().lower()
     include_subgroups = bool(disc_cfg.get("include_subgroups", True))
 
-    # exclusions from config + env
     exclude_projects = disc_cfg.get("exclude_projects", []) or []
     exclude_env = env_list_csv(os.getenv("EXCLUDE_PROJECTS"))
     if exclude_env:
@@ -495,7 +455,6 @@ def discover_projects(
             return []
         return [project]
 
-    # default scope=group
     group_id = os.getenv("GROUP_ID")
     if group_id:
         group = gl.groups.get(int(group_id))
@@ -518,32 +477,6 @@ def discover_projects(
 # -----------------------------
 # Report helpers
 # -----------------------------
-def format_notes_grouped(notes: List[str]) -> str:
-    """
-    notes entries look like:
-      "path/to/file.yml: dep backend: 1.0.1 -> 1.1.2"
-      "path/to/file.yml: chart version: 1.0.1 -> 1.1.2"
-      "path/to/values.yml: vault.image.tag (vault): 1.1.1 -> 1.15.8"
-    We group by file path.
-    """
-    by_file: Dict[str, List[str]] = {}
-    for n in notes:
-        parts = n.split(": ", 1)
-        if len(parts) == 2:
-            fp, change = parts[0], parts[1]
-        else:
-            fp, change = "unknown", n
-        by_file.setdefault(fp, []).append(change)
-
-    out_lines: List[str] = []
-    for fp in sorted(by_file.keys()):
-        out_lines.append(f"File: {fp}")
-        for c in by_file[fp]:
-            out_lines.append(f"  - {c}")
-        out_lines.append("")
-    return "\n".join(out_lines).rstrip() + "\n"
-
-
 def write_report(path: str, content: str, log: logging.Logger) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -551,6 +484,38 @@ def write_report(path: str, content: str, log: logging.Logger) -> None:
         log.info(f"[REPORT] written {path}")
     except Exception as e:
         log.warning(f"[REPORT] cannot write {path}: {e}")
+
+
+def render_project_report_md(
+    path: str,
+    target_branch: str,
+    branch: str,
+    changed_files: List[str],
+    notes_by_file: Dict[str, List[str]],
+    diffs_by_file: Dict[str, str],
+) -> str:
+    lines: List[str] = []
+    lines.append(f"## Project: `{path}`")
+    lines.append("")
+    lines.append(f"- Target branch: `{target_branch}`")
+    lines.append(f"- Working branch: `{branch}`")
+    lines.append(f"- Files changed: **{len(changed_files)}**")
+    lines.append("")
+
+    for fp in changed_files:
+        lines.append(f"### File: `{fp}`")
+        lines.append("")
+        for note in notes_by_file.get(fp, []):
+            lines.append(f"- {note}")
+        lines.append("")
+        diff_text = diffs_by_file.get(fp, "")
+        if diff_text:
+            lines.append("```diff")
+            lines.append(diff_text)
+            lines.append("```")
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 # -----------------------------
@@ -575,10 +540,9 @@ def main():
     gl = gitlab.Gitlab(git_cfg["url"], private_token=token)
     gl.auth()
 
-    default_branch = git_cfg.get("default_branch", "main")
+    cfg_default_branch = git_cfg.get("default_branch", "main")
     labels = git_cfg.get("labels", []) or []
 
-    # ---- Overrides via CI vars ----
     dry_run_cfg = bool(cfg.get("execution", {}).get("dry_run", True))
     dry_run_env = env_truthy(os.getenv("DRY_RUN"))
     dry_run = dry_run_env if dry_run_env is not None else dry_run_cfg
@@ -592,7 +556,6 @@ def main():
     mr_title_prefix = cfg.get("execution", {}).get("mr_title_prefix", "Security patches")
 
     ignore_latest = bool(cfg.get("rules", {}).get("ignore_latest", True))
-    patch_only = bool(cfg.get("rules", {}).get("patch_only", True))
     open_mr_only_if_changed = bool(cfg.get("rules", {}).get("open_mr_only_if_changed", True))
     allowed_deps = cfg.get("rules", {}).get("allowed_deps", None)
 
@@ -602,36 +565,32 @@ def main():
     chart_globs = cfg.get("files", {}).get("chart_globs", ["Chart.yaml"])
     values_globs = cfg.get("files", {}).get("values_globs", ["values.yaml"])
 
-    # Filter globs based on ENVS
     chart_globs_filtered = filter_globs_by_env(chart_globs, envs)
     values_globs_filtered = filter_globs_by_env(values_globs, envs)
 
-    # Unique branch per run (anti-conflict)
     stamp = time.strftime("%Y%m%d-%H%M")
     branch = f"{branch_prefix}-{stamp}"
 
-    # Log effective scope/inputs
-    target = ""
+    target_hint = ""
     if scope == "project":
-        target = os.getenv("PROJECT_PATH") or os.getenv("PROJECT_ID") or "(missing)"
+        target_hint = os.getenv("PROJECT_PATH") or os.getenv("PROJECT_ID") or "(missing)"
     else:
-        target = os.getenv("GROUP_ID") or str(git_cfg.get("group_id"))
+        target_hint = os.getenv("GROUP_ID") or str(git_cfg.get("group_id"))
 
-    log.info(f"[START] scope={scope} target={target} envs={','.join(envs)} dry_run={dry_run} branch={branch}")
+    log.info(f"[START] scope={scope} target={target_hint} envs={','.join(envs)} dry_run={dry_run} branch={branch}")
     log.info(f"[GLOBS] chart_globs={chart_globs_filtered}")
     log.info(f"[GLOBS] values_globs={values_globs_filtered}")
 
-    # Discover projects based on SCOPE
     projects = discover_projects(gl, cfg, log)
 
-    # Global report aggregation
     report_lines: List[str] = []
-    report_lines.append("=== SECURITY PATCH REPORT ===")
-    report_lines.append(f"Timestamp: {stamp}")
-    report_lines.append(f"Scope: {scope}")
-    report_lines.append(f"Target: {target}")
-    report_lines.append(f"Envs: {','.join(envs)}")
-    report_lines.append(f"Dry-run: {dry_run}")
+    report_lines.append("# Security Patch Report")
+    report_lines.append("")
+    report_lines.append(f"- Timestamp: `{stamp}`")
+    report_lines.append(f"- Scope: `{scope}`")
+    report_lines.append(f"- Target input: `{target_hint}`")
+    report_lines.append(f"- Envs: `{','.join(envs)}`")
+    report_lines.append(f"- Dry-run: `{dry_run}`")
     report_lines.append("")
 
     total_projects_scanned = 0
@@ -642,17 +601,19 @@ def main():
     for p in projects:
         project = gl.projects.get(p.id) if hasattr(p, "id") else p
         path = project.path_with_namespace
+        target_branch = resolve_target_branch(project, cfg_default_branch)
 
         total_projects_scanned += 1
-        log.info(f"scan {path} (envs={','.join(envs)} dry_run={dry_run})")
+        log.info(f"[SCAN] {path} target_branch={target_branch} envs={','.join(envs)} dry_run={dry_run}")
 
-        # List repo tree once
         try:
-            tree = project.repository_tree(recursive=True, all=True, ref=default_branch)
+            tree = project.repository_tree(recursive=True, all=True, ref=target_branch)
         except Exception as e:
-            log.warning(f"{path}: cannot read tree: {e}")
-            report_lines.append(f"--- {path} ---")
-            report_lines.append(f"ERROR: cannot read repository tree: {e}")
+            log.warning(f"{path}: cannot read tree on ref={target_branch}: {e}")
+            report_lines.append(f"## Project: `{path}`")
+            report_lines.append("")
+            report_lines.append(f"- Target branch: `{target_branch}`")
+            report_lines.append(f"- Error: cannot read repository tree: `{e}`")
             report_lines.append("")
             continue
 
@@ -669,15 +630,15 @@ def main():
 
         actions: List[Dict[str, Any]] = []
         changed_files: List[str] = []
-        notes: List[str] = []
+        notes_by_file: Dict[str, List[str]] = {}
+        diffs_by_file: Dict[str, str] = {}
 
-        # ---- Patch charts ----
         for cp in chart_candidates:
-            txt = get_file(project, cp, default_branch)
+            txt = get_file(project, cp, target_branch)
             if txt is None:
                 continue
             try:
-                new_txt, changed, n = patch_chart_yaml(txt, policy_deps, allowed_deps)
+                new_txt, changed, notes = patch_chart_yaml(txt, policy_deps, allowed_deps)
             except Exception as e:
                 log.warning(f"{path}: skip {cp} (chart parse error): {e}")
                 continue
@@ -686,17 +647,18 @@ def main():
                 if not validate_yaml(new_txt):
                     log.warning(f"{path}: skip {cp} (invalid YAML after patch)")
                     continue
+                diff_text = build_diff(txt, new_txt, cp)
                 actions.append({"action": "update", "file_path": cp, "content": new_txt})
                 changed_files.append(cp)
-                notes.extend([f"{cp}: {x}" for x in n])
+                notes_by_file[cp] = notes
+                diffs_by_file[cp] = diff_text
 
-        # ---- Patch values ----
         for vp in values_candidates:
-            txt = get_file(project, vp, default_branch)
+            txt = get_file(project, vp, target_branch)
             if txt is None:
                 continue
             try:
-                new_txt, changed, n = patch_values_yaml(txt, images_policy, ignore_latest)
+                new_txt, changed, notes = patch_values_yaml(txt, images_policy, ignore_latest)
             except Exception as e:
                 log.warning(f"{path}: skip {vp} (values parse error): {e}")
                 continue
@@ -705,69 +667,98 @@ def main():
                 if not validate_yaml(new_txt):
                     log.warning(f"{path}: skip {vp} (invalid YAML after patch)")
                     continue
+                diff_text = build_diff(txt, new_txt, vp)
                 actions.append({"action": "update", "file_path": vp, "content": new_txt})
                 changed_files.append(vp)
-                notes.extend([f"{vp}: {x}" for x in n])
+                notes_by_file[vp] = notes
+                diffs_by_file[vp] = diff_text
 
-        if patch_only:
-            pass
-
-        # Report entry
-        report_lines.append(f"--- {path} ---")
-        report_lines.append(f"Default branch: {default_branch}")
-        report_lines.append(f"Branch: {branch}")
-        report_lines.append(f"Candidates: charts={len(chart_candidates)} values={len(values_candidates)}")
+        report_lines.append(f"## Project: `{path}`")
+        report_lines.append("")
+        report_lines.append(f"- Target branch: `{target_branch}`")
+        report_lines.append(f"- Working branch: `{branch}`")
+        report_lines.append(f"- Candidates: charts={len(chart_candidates)}, values={len(values_candidates)}")
 
         if open_mr_only_if_changed and not actions:
-            log.info(f"{path}: no changes")
-            report_lines.append("Result: no changes")
+            log.info(f"[NO-CHANGE] {path}")
+            report_lines.append("- Result: no changes")
             report_lines.append("")
             continue
 
-        # changes exist
         total_projects_changed += 1
         unique_files = sorted(set(changed_files))
-        report_lines.append("Result: changes detected")
-        report_lines.append(f"Files to patch: {len(unique_files)}")
-        report_lines.append(f"Changes: {len(notes)}")
-        report_lines.append("")
-        report_lines.append(format_notes_grouped(notes))
-        report_lines.append("")
+        project_change_count = sum(len(v) for v in notes_by_file.values())
 
         total_files_changed += len(unique_files)
-        total_changes += len(notes)
+        total_changes += project_change_count
 
-        # Ensure branch (once)
+        report_lines.append(f"- Result: changes detected")
+        report_lines.append(f"- Files to patch: **{len(unique_files)}**")
+        report_lines.append(f"- Changes: **{project_change_count}**")
+        report_lines.append("")
+
+        report_lines.append(
+            render_project_report_md(
+                path=path,
+                target_branch=target_branch,
+                branch=branch,
+                changed_files=unique_files,
+                notes_by_file=notes_by_file,
+                diffs_by_file=diffs_by_file,
+            )
+        )
+        report_lines.append("")
+
         if create_branch_if_missing:
-            ok_branch = ensure_branch(project, branch, default_branch, dry_run, log)
+            ok_branch = ensure_branch(project, branch, target_branch, dry_run, log)
             if not ok_branch:
                 continue
 
-        # Commit once (multi-actions)
         commit_msg = f"security: align charts/values ({stamp})"
         ok_commit = commit_actions(project, branch, actions, commit_msg, dry_run, log)
         if not ok_commit:
             sys.exit(1)
 
-        # Build MR description
         title = f"{mr_title_prefix} ({stamp})"
-        desc = (
-            "Automated security alignment.\n\n"
-            f"Project: {path}\n"
-            f"Scope: {scope}\n"
-            f"Target: {target}\n"
-            f"Envs: {','.join(envs)}\n"
-            f"Branch: {branch}\n"
-            f"Changed files: {len(unique_files)}\n\n"
-            "Files:\n" + "\n".join([f"- {f}" for f in unique_files])
-        )
-        if notes:
-            desc += "\n\nNotes:\n" + "\n".join([f"- {x}" for x in notes[:200]])
+
+        desc_lines: List[str] = []
+        desc_lines.append("## Automated security alignment")
+        desc_lines.append("")
+        desc_lines.append(f"- Project: `{path}`")
+        desc_lines.append(f"- Target branch: `{target_branch}`")
+        desc_lines.append(f"- Working branch: `{branch}`")
+        desc_lines.append(f"- Scope: `{scope}`")
+        desc_lines.append(f"- Envs: `{','.join(envs)}`")
+        desc_lines.append(f"- Changed files: **{len(unique_files)}**")
+        desc_lines.append("")
+        desc_lines.append("### Files")
+        for fpath in unique_files:
+            desc_lines.append(f"- `{fpath}`")
+        desc_lines.append("")
+
+        desc_lines.append("### Changes")
+        for fpath in unique_files:
+            desc_lines.append(f"#### `{fpath}`")
+            for n in notes_by_file.get(fpath, []):
+                desc_lines.append(f"- {n}")
+            desc_lines.append("")
+
+        desc_lines.append("### Diff Preview")
+        for fpath in unique_files:
+            diff_preview = truncate_text(diffs_by_file.get(fpath, ""), 3000)
+            if diff_preview:
+                desc_lines.append(f"#### `{fpath}`")
+                desc_lines.append("```diff")
+                desc_lines.append(diff_preview)
+                desc_lines.append("```")
+                desc_lines.append("")
+
+        desc = "\n".join(desc_lines)
 
         mr_url = upsert_mr(
             project=project,
             source_branch=branch,
-            target_branch=default_branch,
+            target_branch=target_branch,
             title=title,
             description=desc,
             labels=labels,
@@ -776,32 +767,31 @@ def main():
         )
         if mr_url:
             log.info(f"[MR] {mr_url}")
-            report_lines.append(f"MR: {mr_url}")
+            report_lines.append(f"- MR: {mr_url}")
             report_lines.append("")
 
-        # In dry-run, show detailed report in logs as well
-        if dry_run and notes:
+        if dry_run:
             log.info("")
-            log.info("=== SECURITY PATCH REPORT (project) ===")
-            log.info(f"Project: {path}")
-            log.info(format_notes_grouped(notes).rstrip())
-            log.info(f"Summary: {len(unique_files)} file(s), {len(notes)} change(s)")
+            log.info(f"=== SECURITY PATCH REPORT ({path}) ===")
+            for fpath in unique_files:
+                log.info(f"File: {fpath}")
+                for n in notes_by_file.get(fpath, []):
+                    log.info(f"  - {n}")
+            log.info(f"Summary: {len(unique_files)} file(s), {project_change_count} change(s)")
             log.info("")
 
-    # Global summary
-    report_lines.append("=== SUMMARY ===")
-    report_lines.append(f"Projects scanned: {total_projects_scanned}")
-    report_lines.append(f"Projects with changes: {total_projects_changed}")
-    report_lines.append(f"Files to patch (total): {total_files_changed}")
-    report_lines.append(f"Changes (total): {total_changes}")
+    report_lines.append("## Summary")
     report_lines.append("")
-    report_content = "\n".join(report_lines)
+    report_lines.append(f"- Projects scanned: **{total_projects_scanned}**")
+    report_lines.append(f"- Projects with changes: **{total_projects_changed}**")
+    report_lines.append(f"- Files to patch (total): **{total_files_changed}**")
+    report_lines.append(f"- Changes (total): **{total_changes}**")
+    report_lines.append("")
 
-    # Write artifact report
-    report_path = os.getenv("REPORT_PATH") or "report.txt"
+    report_content = "\n".join(report_lines)
+    report_path = os.getenv("REPORT_PATH") or "report.md"
     write_report(report_path, report_content, log)
 
-    # Also show summary in job log
     log.info(
         f"[SUMMARY] projects_scanned={total_projects_scanned} "
         f"projects_changed={total_projects_changed} "
