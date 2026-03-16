@@ -29,6 +29,16 @@ spec:
         - "dev,int,qua,prod"
         - "dev,int,qua,prd"
         - "dev,int,qua,prod,qualiso"
+        
+    target_branch:
+      description: "Branche cible (vide = branche par défaut du projet)"
+      type: string
+      default: ""
+      options:
+        - ""
+        - "main"
+        - "master"
+        - "roks"
 
     group_id:
       description: "Group ID si scope=group (vide = prend config.yaml)"
@@ -62,10 +72,12 @@ workflow:
 
 variables:
   BOT_CONFIG: "config.yaml"
+  REPORT_PATH: "report.md"
 
   # Inputs -> variables d'environnement pour patch_bot.py
   SCOPE: $[[ inputs.scope ]]
   ENVS: $[[ inputs.envs ]]
+  TARGET_BRANCH: $[[ inputs.target_branch ]]
   GROUP_ID: $[[ inputs.group_id ]]
   PROJECT_PATH: $[[ inputs.project_path ]]
   PROJECT_ID: $[[ inputs.project_id ]]
@@ -75,12 +87,14 @@ variables:
   - |
     echo "== Effective parameters (from pipeline inputs) =="
     echo "BOT_CONFIG=$BOT_CONFIG"
+    echo "REPORT_PATH=$REPORT_PATH"
     echo "SCOPE=$SCOPE"
     echo "GROUP_ID=$GROUP_ID"
     echo "PROJECT_PATH=$PROJECT_PATH"
     echo "PROJECT_ID=$PROJECT_ID"
     echo "ENVS=$ENVS"
     echo "BRANCH_PREFIX=$BRANCH_PREFIX"
+    echo "TARGET_BRANCH=${TARGET_BRANCH:-<project-default>}"
 
 .setup_python: &setup_python
   - |
@@ -106,9 +120,8 @@ validate-inputs:
     - *setup_python
   script:
     - *before_script_ca
+    - echo "== Validate inputs =="
     - |
-      echo "== Validate inputs =="
-
       case "$SCOPE" in
         group|project) ;;
         *)
@@ -126,6 +139,14 @@ validate-inputs:
         *)
           echo "ERROR: ENVS invalid."
           echo "Allowed examples: all / dev / int / qua / prod / prd / qualiso / dev,int / dev,int,qua ..."
+          exit 2
+          ;;
+      esac
+
+      case "${TARGET_BRANCH:-}" in
+        ""|main|master|roks) ;;
+        *)
+          echo "ERROR: TARGET_BRANCH must be empty, main, master or roks"
           exit 2
           ;;
       esac
@@ -154,7 +175,7 @@ security-report:
   artifacts:
     when: always
     paths:
-      - report.txt
+      - report.md
     expire_in: 30 days
 
 security-apply:
@@ -172,5 +193,6 @@ security-apply:
   artifacts:
     when: always
     paths:
-      - report.txt
+      - report.md
     expire_in: 30 days
+
