@@ -7,9 +7,9 @@ gitlab:
     - security
     - auto
     - dependency-update
-
 discovery:
   include_subgroups: true
+
   exclude_projects:
     - "*/sandbox"
     - "*/archive-*"
@@ -17,6 +17,7 @@ discovery:
     - "*/demo-*"
 
 files:
+
   chart_globs:
     - "**/dev/Chart.y*ml"
     - "**/int/Chart.y*ml"
@@ -34,140 +35,127 @@ files:
     - "**/qualiso/values/values.y*ml"
 
 policy:
+
   helm_dependencies:
+
     frontend: "1.0.7"
     backend: "1.0.10"
     batch: "1.1.14"
     spark: "3.1.0"
-    rollout: "1.0.9"
-    autosys: "1.0.5"
+
+    rollout: "1.0.23"
+    autosys: "1.0.23"
 
   images:
+
     httpd:
-      names:
-        - "httpd"
+      names: ["httpd"]
       repositories:
         - "httpd"
         - "docker.io/library/httpd"
       tag: "2.4.70"
 
     vault:
-      names:
-        - "vault"
+      names: ["vault"]
       repositories:
         - "hashicorp/vault"
         - "docker.io/hashicorp/vault"
       tag: "1.21.2"
 
     python:
-      names:
-        - "python"
+      names: ["python"]
       repositories:
         - "python"
         - "docker.io/library/python"
       tag: "3.12.57"
 
     php:
-      names:
-        - "php"
+      names: ["php"]
       repositories:
         - "php"
         - "docker.io/library/php"
       tag: "8.2.33"
 
     php83:
-      names:
-        - "php83"
+      names: ["php83"]
       tag: "8.3.3"
 
     nodejs20:
-      names:
-        - "nodejs20"
+      names: ["nodejs20"]
       tag: "20.0.13"
 
     nodejs22:
-      names:
-        - "nodejs22"
+      names: ["nodejs22"]
       tag: "22.0.7"
 
     nodejs24:
-      names:
-        - "nodejs24"
+      names: ["nodejs24"]
       tag: "24.0.1"
 
     openjdk11:
-      names:
-        - "openjdk11"
+      names: ["openjdk11"]
       tag: "11.1.24"
 
     openjdk17:
-      names:
-        - "openjdk17"
+      names: ["openjdk17"]
       tag: "17.1.26"
 
     jdksemeru11:
-      names:
-        - "jdksemeru11"
+      names: ["jdksemeru11"]
       tag: "8.1.23"
 
     jdksemeru17:
-      names:
-        - "jdksemeru17"
+      names: ["jdksemeru17"]
       tag: "17.1.33"
 
     jdksemeru21:
-      names:
-        - "jdksemeru21"
+      names: ["jdksemeru21"]
       tag: "21.0.29"
 
     jdksemeru25:
-      names:
-        - "jdksemeru25"
+      names: ["jdksemeru25"]
       tag: "25.0.5"
 
     dotnet-aspnet-runtime8:
-      names:
-        - "dotnet-aspnet-runtime8"
+      names: ["dotnet-aspnet-runtime8"]
       tag: "8.0.20"
 
     dotnet-aspnet-runtime10:
-      names:
-        - "dotnet-aspnet-runtime10"
+      names: ["dotnet-aspnet-runtime10"]
       tag: "10.0.3"
 
     frb-rollout:
-      names:
-        - "frb-rollout"
+      names: ["frb-rollout"]
       tag: "1.0.23"
 
     ttu8:
-      names:
-        - "ttu8"
+      names: ["ttu8"]
       tag: "17.20.23"
 
     ttu17:
-      names:
-        - "ttu17"
+      names: ["ttu17"]
       tag: "20.0.40"
 
     ttu21:
-      names:
-        - "ttu21"
+      names: ["ttu21"]
       tag: "20.0.7"
 
 rules:
+
   ignore_latest: true
   patch_only: true
   open_mr_only_if_changed: true
+
   allowed_deps:
-    - "frontend"
-    - "backend"
-    - "batch"
-    - "spark"
-    - "rollout"
-    - "autosys"
+    - frontend
+    - backend
+    - batch
+    - spark
+    - rollout
+    - autosys
 
 execution:
+
   dry_run: true
   log_level: "INFO"
   create_branch_if_missing: true
